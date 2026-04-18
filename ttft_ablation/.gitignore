@@ -1,0 +1,4 @@
+# Raw server debug logs get large (A baseline = ~40 MB of TTFT_DEBUG lines).
+# Keep the small *.repro.log summaries so the headline numbers are tracked,
+# but exclude the MB-sized full scheduler traces.
+results/**/*.server.log
