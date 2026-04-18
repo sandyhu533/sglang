@@ -110,7 +110,10 @@ Log evidence from `ttft_ablation/results/primary/A_baseline.server.log`:
   full queue every iter even when KV is truly saturated, causing SET/
   revoke churn that steals scheduler time from decode. Test showed
   small p99 only drops to 12.3 s (vs 2.9 s for the guarded form), and
-  large p99 regresses +31 %.
+  large p99 regresses +31 %. Default overlap scheduling does not hide
+  this: E2's scheduler iter frequency drops 42 % vs A (431 vs 738
+  iters/s), i.e. the CPU churn bleeds through the CPU/GPU pipeline and
+  throttles GPU step cadence.
 
 - **Raise default `chunked_prefill_size`** to ≥ typical prompt length:
   D_chunk32k shows chunk alone improves p99 to 10.4 s. But (a) it has
@@ -121,6 +124,83 @@ Log evidence from `ttft_ablation/results/primary/A_baseline.server.log`:
 - **Bounded patience / aging** for skipped reqs: reasonable but adds
   state and a threshold to pick. Deferred to a follow-up PR if anyone
   reports large-req starvation under adversarial traffic patterns.
+
+## Throughput validation (pre-registered)
+
+The repro workload (`repro_bench.py`) is a burst benchmark — it answers
+"does the fix help TTFT?" decisively but does not stress the fix under
+sustained saturation. Before opening the upstream PR, run the following
+benchmark with decision rule locked-in *before* seeing results.
+
+**Workload**
+
+- Harness: `python -m sglang.bench_serving`
+- Dataset: ShareGPT (`--dataset-name sharegpt`)
+- Model: `Qwen/Qwen3-0.6B` on 1× RTX 4090
+- Server args: defaults + `--mem-fraction-static 0.82`
+- `--num-prompts 1000`; three concurrency sweeps: `--max-concurrency {32, 64, 128}`
+- `--request-rate inf` (offline saturation mode)
+- 3 seeds per cell
+
+**Configs**
+
+| label | server flags | rationale |
+|---|---|---|
+| A | baseline | reference |
+| E3 | `SGLANG_TTFT_HOL_SMART=1` | the proposed fix, production candidate |
+| G3 | `SGLANG_TTFT_HOL_SMART=1` + `--chunked-prefill-size 32768` | shows whether chunk sizing is an additional knob |
+
+Skip E2 (blunt, already known regression) and D/H (orthogonal, separate
+discussion).
+
+**Metrics**
+
+- Primary: output token throughput (tok/s)
+- Secondary: input tok/s, mean TTFT, p99 TTFT, ITL p99
+
+**Reporting**
+
+PR description will include μ ± σ (from the 3 seeds) for every cell, not
+just point estimates. Theoretical expectation: in sustained saturation,
+`rem_total_tokens == 0` holds most of the time, so E3's smart guard falls
+through to the original `break` path and E3 should be indistinguishable
+from A. Burst workload (`repro_bench.py`) already shows E3 is strictly
+better there. Reviewers can weigh the numbers against their own
+throughput bar and decide whether to merge.
+
+**Predictions** (stated before running, so "surprise" is meaningful)
+
+*Throughput:*
+- concurrency=32 (light load): E3 ≈ A. Skip path rarely triggers.
+- concurrency=64 (medium): E3 ≈ A, maybe marginally better.
+- concurrency=128 (saturated): E3 ≈ A. Smart guard falls through to
+  `break` when `rem_total_tokens == 0`. If E3 regresses vs A here, the
+  guard has a hole (likely missing the distinction between
+  `rem_total_tokens == 0` — true saturation — and `rem_input_tokens == 0`
+  / `rem_chunk_tokens == 0` — chunk-budget only).
+
+*TTFT p99:*
+- Saturation ≠ `rem_total_tokens == 0` holding continuously. When a
+  decode completes it frees N KV slots; if the head-of-queue req needs
+  M > N, baseline `break`s and leaves those N slots idle for an iter,
+  while E3 admits smaller reqs behind it to fill them. This window
+  persists whenever the workload is prompt-length-heterogeneous.
+- concurrency=32: E3 ≈ A.
+- concurrency=64: E3 better by ~5–15 % on TTFT p99.
+- concurrency=128: E3 better by ~10–30 % on TTFT p99; p50 ≈ A.
+- **Workload note**: this prediction assumes ShareGPT-style heterogeneous
+  prompts. On a fixed-length `--dataset-name random` run, heterogeneity
+  = 0 and the skip path never fires productively, so TTFT ≈ A. PR
+  description should call this out so reviewers running homogeneous
+  benchmarks don't conclude "no latency benefit".
+
+*ITL p99:* E3 ≈ A (maybe marginally worse from batch composition
+changes, but below 1σ).
+
+**Output artifacts**
+
+- `results/bench_serving/<config>_<concurrency>_seed<N>.json`
+- Summary table appended to this file after runs complete
 
 ## Risk / follow-ups
 

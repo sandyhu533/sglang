@@ -19,6 +19,8 @@ computed against the primary A_baseline column.
 | run | config | HOL mode | small p50 | small p99 | Δ small p99 | large p99 | Δ large p99 | large mean | peak bs |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
 | A_baseline (primary) | chunk=2048 | off | 24 306 | 27 152 | — (ref) | 26 105 | — (ref) | 13 837 | 100 |
+| F1_smoke_fix (refuted H1) | chunk=2048, flag reset @ ENTRY | off | 25 935 | 28 720 | +6 % | 27 611 | +6 % | 14 626 | 103 |
+| C_mrr8 (refuted H_decode) | chunk=2048, `--max-running-requests 8` | off | 29 145 | 30 614 | +13 % | 28 507 | +9 % | 15 088 | 8 |
 | E2_hol_fix | chunk=2048 | blunt | 9 730 | 12 336 | −55 % | 34 129 | **+31 %** | 19 402 | 74 |
 | D_chunk32k | chunk=32 768 | off | 7 556 | 10 441 | −62 % | 10 497 | −60 % | 5 323 | 100 |
 | H_chunk_12k | chunk=12 288 | off | 7 533 | 10 306 | −62 % | 10 418 | −60 % | 5 301 | 100 |
@@ -28,10 +30,40 @@ computed against the primary A_baseline column.
 | A_baseline (replicate) | chunk=2048 | off | 8 011 | 10 870 | — | 10 919 | — | 5 581 | — |
 | E3_smart_hol (replicate) | chunk=2048 | smart | 1 092 | 3 245 | — | 13 744 | — | 7 134 | — |
 
-Key reading: only E2 regresses large p99 (**+31 %**) — the blunt
-unconditional skip starves larges. Every other fix *improves* large p99
-(−51 % to −60 %) because smalls clearing faster speeds up batch turnover.
-E3 gets the small-p99 win without E2's starvation cost.
+Key reading:
+
+1. **Root cause is admission-loop semantics (H11), not flag stickiness or
+   slot count.** F1 (clear sticky flag at ENTRY) leaves small p99 at 28.7 s
+   (+6 %) — refutes H1. C_mrr8 (cap running_bs at 8) makes small p99 *worse*
+   at 30.6 s (+13 %) — refutes H_decode ("decode batch is the bottleneck").
+   Both null configs kept in the table to show what doesn't work.
+
+2. **E3 is the minimal fix (single env flag, default chunk).** E3 (2 854 ms)
+   ≈ G (2 821 ms) ≈ G3 (2 751 ms) on small p99 — within noise. Fixing the
+   admission loop at chunk=2048 matches combining it with chunk=32 k.
+   Chunk sizing is orthogonal and becomes unnecessary once the loop is fixed.
+
+3. **Chunk sizing alone is a partial fix, not the whole story.** D (10 441 ms)
+   and H (10 306 ms) hit the same −62 % floor for small p99 but stop there;
+   the remaining 10 s comes from the admission loop breaking on NO_TOKEN.
+   H11 and H14 contribute independently and additively — need both to reach
+   the ~3 s regime.
+
+4. **Sizing threshold is `chunk ≥ max_req_input_len`, not "bigger is better".**
+   D (32 k) ≈ H (12 k) within noise. Auto-tune can be cheap — just compare
+   chunked_prefill_size against the largest admitted request.
+
+5. **Only E2 regresses large p99 (+31 %).** Blunt unconditional skip starves
+   larges. Every smarter fix (D / G / E3 / G3) *improves* large p99 by
+   51–60 % because smalls clearing fast speeds up batch turnover, freeing
+   larges sooner. E3 captures both wins.
+
+6. **Every HOL-skipping config drops peak running_bs 100 → 74.** Not a
+   KV-utilization loss — smalls cycle through faster under the fix, so the
+   concurrent-snapshot is lower while total throughput is higher (large
+   mean TTFT also drops 50 %). Real secondary cost is a slight per-step
+   decode-batch MFU reduction from smaller batches. Worth calling out in
+   the PR as a secondary metric, but it is not a tradeoff.
 
 All numbers in ms. "HOL mode": `off` = original, `blunt` = continue on every NO_TOKEN
 (`SGLANG_TTFT_HOL_FIX=1`), `smart` = continue only when `rem_total_tokens > 0`
