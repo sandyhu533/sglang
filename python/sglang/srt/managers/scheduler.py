@@ -2443,9 +2443,34 @@ class Scheduler(
             # Reset batch_is_full to try preemption with a prefill adder.
             self.running_batch.batch_is_full = False
 
+# >>> TTFT_ABLATION_PATCH START [smoke_fix]
+        # [TTFT SMOKE FIX F1] Demote sticky cross-iteration flag to per-iter
+        if os.environ.get("SGLANG_TTFT_SMOKE_FIX", "0") == "1":
+            self.running_batch.batch_is_full = False
+# <<< TTFT_ABLATION_PATCH END [smoke_fix]
+# >>> TTFT_ABLATION_PATCH START [debug_entry]
+        # [TTFT DEBUG] entry log
+        if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+            logger.info(
+                f"[TTFT_DEBUG] ev=ENTRY t={time.perf_counter():.6f} "
+                f"running_bs={len(self.running_batch.reqs)} "
+                f"waiting={len(self.waiting_queue)} "
+                f"batch_is_full={self.running_batch.batch_is_full} "
+                f"chunked_req={self.chunked_req is not None} "
+                f"kv_avail={self.token_to_kv_pool_allocator.available_size()}"
+            )
+# <<< TTFT_ABLATION_PATCH END [debug_entry]
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
+# >>> TTFT_ABLATION_PATCH START [debug_early_return]
+            if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+                logger.info(
+                    f"[TTFT_DEBUG] ev=EARLY_RETURN t={time.perf_counter():.6f} "
+                    f"batch_is_full={self.running_batch.batch_is_full} "
+                    f"waiting={len(self.waiting_queue)}"
+                )
+# <<< TTFT_ABLATION_PATCH END [debug_early_return]
             return None
 
         running_bs = len(self.running_batch.reqs)
@@ -2461,6 +2486,13 @@ class Scheduler(
             and not self.enable_priority_preemption
         ):
             self.running_batch.batch_is_full = True
+# >>> TTFT_ABLATION_PATCH START [debug_set_a]
+            if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+                logger.info(
+                    f"[TTFT_DEBUG] ev=SET_A_ALLOCATABLE_ZERO "
+                    f"t={time.perf_counter():.6f} running_bs={running_bs}"
+                )
+# <<< TTFT_ABLATION_PATCH END [debug_set_a]
             return None
 
         # Get priority queue
@@ -2526,6 +2558,15 @@ class Scheduler(
             running_bs = len(self.running_batch.reqs)
             if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
                 self.running_batch.batch_is_full = True
+# >>> TTFT_ABLATION_PATCH START [debug_set_b]
+                if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+                    logger.info(
+                        f"[TTFT_DEBUG] ev=SET_B_CAN_RUN_SATURATED "
+                        f"t={time.perf_counter():.6f} running_bs={running_bs} "
+                        f"can_run={len(adder.can_run_list)} "
+                        f"req_input_len={len(req.origin_input_ids)}"
+                    )
+# <<< TTFT_ABLATION_PATCH END [debug_set_b]
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 # In prefill mode, prealloc queue and transfer queue can also take memory,
                 # so we need to check if the available size for the actual available size.
@@ -2568,6 +2609,16 @@ class Scheduler(
                         ) > 0 or (not self.running_batch.is_empty())
                     else:
                         self.running_batch.batch_is_full = True
+# >>> TTFT_ABLATION_PATCH START [debug_set_c]
+                    if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+                        logger.info(
+                            f"[TTFT_DEBUG] ev=SET_C_NO_TOKEN "
+                            f"t={time.perf_counter():.6f} "
+                            f"req_input_len={len(req.origin_input_ids)} "
+                            f"can_run={len(adder.can_run_list)} "
+                            f"kv_avail={self.token_to_kv_pool_allocator.available_size()}"
+                        )
+# <<< TTFT_ABLATION_PATCH END [debug_set_c]
                 # revert matched mamba idx to avoid memory leak, if req is not added
                 added = len(adder.can_run_list) > 0 and req is adder.can_run_list[-1]
                 if not added and req.mamba_pool_idx is not None:
@@ -2575,6 +2626,30 @@ class Scheduler(
                         req.mamba_pool_idx.unsqueeze(-1)
                     )
                     req.mamba_pool_idx = None
+# >>> TTFT_ABLATION_PATCH START [hol_fix_e2_e3]
+                _hol_mode = (
+                    "smart" if os.environ.get("SGLANG_TTFT_HOL_SMART", "0") == "1"
+                    else ("blunt" if os.environ.get("SGLANG_TTFT_HOL_FIX", "0") == "1"
+                    else None)
+                )
+                if _hol_mode is not None and res == AddReqResult.NO_TOKEN:
+                    _can_skip = (
+                        _hol_mode == "blunt"
+                        or (_hol_mode == "smart" and int(adder.rem_total_tokens) > 0)
+                    )
+                    if _can_skip:
+                        self.running_batch.batch_is_full = False
+                        if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+                            logger.info(
+                                f"[TTFT_DEBUG] ev=HOL_FIX_SKIP "
+                                f"t={time.perf_counter():.6f} "
+                                f"mode={_hol_mode} "
+                                f"skipped_input_len={len(req.origin_input_ids)} "
+                                f"rem_total_tokens={int(adder.rem_total_tokens)} "
+                                f"can_run={len(adder.can_run_list)}"
+                            )
+                        continue
+# <<< TTFT_ABLATION_PATCH END [hol_fix_e2_e3]
                 break
 
         # Update waiting queue
@@ -2729,6 +2804,14 @@ class Scheduler(
 
         if batch.batch_size() < initial_bs:
             batch.batch_is_full = False
+# >>> TTFT_ABLATION_PATCH START [debug_clear_d]
+            if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":
+                logger.info(
+                    f"[TTFT_DEBUG] ev=CLEAR_D_BATCH_SHRUNK "
+                    f"t={time.perf_counter():.6f} initial_bs={initial_bs} "
+                    f"new_bs={batch.batch_size()}"
+                )
+# <<< TTFT_ABLATION_PATCH END [debug_clear_d]
 
         if batch.is_empty():
             return batch

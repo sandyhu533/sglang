@@ -179,15 +179,19 @@ REPLACE_SET_C = (
 # clearing the flag at next ENTRY doesn't change the traversal order —
 # next iteration re-enters from queue head, hits same large, breaks again.
 #
-# Fix (E2): when SGLANG_TTFT_HOL_FIX=1, on NO_TOKEN, revoke the flag set
-# we just did (batch isn't "full" in a slot sense; we just couldn't fit
-# THIS particular req) and `continue` to the next waiting req.
+# Fix (E2, blunt form): when SGLANG_TTFT_HOL_FIX=1, on NO_TOKEN, revoke the
+# flag and `continue` unconditionally to the next waiting req.
 #
-# Safety concerns left for the production PR:
-#   - large-req starvation (need aging / bounded skip)
-#   - NO_TOKEN with 3 different root causes (rem_total / rem_input /
-#     rem_chunk); continue is only strictly correct for rem_total
-# For smoke testing H11, the bluntest form is fine.
+# Fix (E3, smart form, gated by SGLANG_TTFT_HOL_SMART=1):
+#   - `continue` only if `adder.rem_total_tokens > 0`, i.e., there IS still
+#     some KV slack that a smaller req might fit into. When rem drops to 0,
+#     we're truly saturated and breaking is cheaper than walking the queue.
+#   - Revokes batch_is_full on skip (same as E2).
+#   - Keeps break+flag on NO_TOKEN when truly saturated (same as baseline).
+#
+# E3 is the candidate for the upstream PR: local change, preserves original
+# break path for the truly-saturated case, avoids the SET_C event storm
+# that the blunt E2 causes under G.
 # ----------------------------------------------------------------------------
 ANCHOR_HOL_FIX = (
     "                    req.mamba_pool_idx = None\n"
@@ -195,22 +199,30 @@ ANCHOR_HOL_FIX = (
 )
 REPLACE_HOL_FIX = (
     "                    req.mamba_pool_idx = None\n"
-    f"{MARK_START} [hol_fix_e2]\n"
-    "                if (\n"
-    '                    os.environ.get("SGLANG_TTFT_HOL_FIX", "0") == "1"\n'
-    "                    and res == AddReqResult.NO_TOKEN\n"
-    "                ):\n"
-    "                    # E2: revoke flag + try next waiting req (H11 HOL fix).\n"
-    "                    self.running_batch.batch_is_full = False\n"
-    '                    if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":\n'
-    "                        logger.info(\n"
-    '                            f"[TTFT_DEBUG] ev=HOL_FIX_SKIP "\n'
-    '                            f"t={time.perf_counter():.6f} "\n'
-    '                            f"skipped_input_len={len(req.origin_input_ids)} "\n'
-    '                            f"can_run={len(adder.can_run_list)}"\n'
-    "                        )\n"
-    "                    continue\n"
-    f"{MARK_END} [hol_fix_e2]\n"
+    f"{MARK_START} [hol_fix_e2_e3]\n"
+    "                _hol_mode = (\n"
+    '                    "smart" if os.environ.get("SGLANG_TTFT_HOL_SMART", "0") == "1"\n'
+    '                    else ("blunt" if os.environ.get("SGLANG_TTFT_HOL_FIX", "0") == "1"\n'
+    '                    else None)\n'
+    "                )\n"
+    "                if _hol_mode is not None and res == AddReqResult.NO_TOKEN:\n"
+    "                    _can_skip = (\n"
+    '                        _hol_mode == "blunt"\n'
+    '                        or (_hol_mode == "smart" and int(adder.rem_total_tokens) > 0)\n'
+    "                    )\n"
+    "                    if _can_skip:\n"
+    "                        self.running_batch.batch_is_full = False\n"
+    '                        if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":\n'
+    "                            logger.info(\n"
+    '                                f"[TTFT_DEBUG] ev=HOL_FIX_SKIP "\n'
+    '                                f"t={time.perf_counter():.6f} "\n'
+    '                                f"mode={_hol_mode} "\n'
+    '                                f"skipped_input_len={len(req.origin_input_ids)} "\n'
+    '                                f"rem_total_tokens={int(adder.rem_total_tokens)} "\n'
+    '                                f"can_run={len(adder.can_run_list)}"\n'
+    "                            )\n"
+    "                        continue\n"
+    f"{MARK_END} [hol_fix_e2_e3]\n"
     "                break\n"
 )
 

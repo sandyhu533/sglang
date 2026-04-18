@@ -235,5 +235,34 @@ if [[ "$TARGET" == "E2" || "$TARGET" == "all" ]]; then
   run_config "E2_hol_fix" "SGLANG_TTFT_HOL_FIX=1" ""
 fi
 
+# G — D + E2 combined. Tests whether the HOL fix buys anything on top of a
+# chunk size that already eliminates the chunked_req state. If G ≈ D, the
+# production-grade fix should target the sizing policy / chunked_req
+# interaction, not the FCFS break.
+if [[ "$TARGET" == "G" || "$TARGET" == "all" ]]; then
+  run_config "G_chunk_hol_combo" "SGLANG_TTFT_HOL_FIX=1" "--chunked-prefill-size 32768"
+fi
+
+# H — threshold probe: smallest chunk size that still fits every "large" in
+# one shot (large≈11300 tokens → 12288 for a safe multiple-of-page ceiling).
+# If H ≈ D, the mechanism is "chunk >= max_req"; if H is notably worse,
+# something else besides the chunked_req-free state matters.
+if [[ "$TARGET" == "H" || "$TARGET" == "all" ]]; then
+  run_config "H_chunk_12k" "" "--chunked-prefill-size 12288"
+fi
+
+# E3 — SMART HOL fix (candidate for upstream PR). On NO_TOKEN, skip only
+# when `rem_total_tokens > 0`; when genuinely saturated, keep the break.
+# Default chunk=2048 to isolate E3's contribution from the chunk sizing fix.
+if [[ "$TARGET" == "E3" || "$TARGET" == "all" ]]; then
+  run_config "E3_smart_hol" "SGLANG_TTFT_HOL_SMART=1" ""
+fi
+
+# G3 — E3 on top of large chunk size (counterpart of G_chunk_hol_combo).
+# Expected: ≈ G on small p99 with fewer SET_C events and better large p99.
+if [[ "$TARGET" == "G3" || "$TARGET" == "all" ]]; then
+  run_config "G3_smart_combo" "SGLANG_TTFT_HOL_SMART=1" "--chunked-prefill-size 32768"
+fi
+
 echo ">>> All configs complete. Results in: $OUTDIR"
 echo ">>> Next step: python3 parse_logs.py $OUTDIR"

@@ -1,0 +1,20 @@
+Server: http://localhost:30001
+Workload: 40 large (3500 words) + 120 small (40 words)
+Baseline: 82 ms (single small request)
+
+  Run 1/3: Small p99=2695ms  Large p99=12237ms  (small samples=120, large samples=40)
+  Run 2/3: Small p99=2708ms  Large p99=11990ms  (small samples=120, large samples=40)
+  Run 3/3: Small p99=2701ms  Large p99=12179ms  (small samples=120, large samples=40)
+
+============================================================
+Small requests (360 samples):
+  Baseline : 82 ms
+  Small burst p50: 233 ms
+  Small p99: 2751 ms (33.5x baseline)
+  Small mean: 755 ms
+Large requests (120 samples):
+  Large p99: 12237 ms
+  Large mean: 6544 ms
+
+Within 5s threshold (small p99=2751ms).
+============================================================

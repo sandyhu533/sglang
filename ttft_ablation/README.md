@@ -1,82 +1,66 @@
-# TTFT Ablation — Issue #22831 Phase 1B
+# TTFT Ablation — Issue #22831
 
-Work directory, not committed. Run on the GPU box after cloning the branch.
+Research directory for the small-request TTFT regression reported in
+[sgl-project/sglang#22831](https://github.com/sgl-project/sglang/issues/22831).
 
-## One-time setup (GPU box)
+**Status**: root cause identified, fix proposed, empirical validation done.
+For the TL;DR and the patch, see [CONCLUSION.md](CONCLUSION.md).
+
+## Layout
+
+```
+ttft_ablation/
+├── README.md              ← you are here (navigation)
+├── CONCLUSION.md          ← proposed PR: root cause, fix, diff, validation
+├── EXPERIMENT_LOG.md      ← full journal: all hypotheses, all runs, analysis
+│
+├── repro_bench.py         ← self-contained TTFT load generator (no fuzzer dep)
+├── run_ablation.sh        ← harness: runs A/E2/D/H/G/E3/G3 configs end-to-end
+├── parse_logs.py          ← extracts TTFT + flag-episode stats → markdown table
+├── patches/
+│   └── apply_patches.py   ← idempotent anchor-based patcher for scheduler.py
+│
+└── results/
+    ├── primary/           ← final runs (A, E2, D, H, G, E3, G3) on a common server
+    ├── replicate/         ← outer-loop replicate (A, E3) for variance estimate
+    └── refuted_configs/   ← supporting data for refuted hypotheses (F1, C)
+```
+
+Pod-level setup lives outside this dir at `/workspace/pod_bootstrap.sh` —
+it provisions the venv and HF cache on /workspace so the 20 GB ephemeral
+overlay doesn't fill up. Not part of the project itself.
+
+## Quick start (reproducing the result)
 
 ```bash
-cd /path/to/sglang
-git checkout scheduler/ttft-asymmetric-prefill
-pip install -e "python[all]"
-
-# Apply ablation patches (anchor-based in-place edit, survives line drift).
-# Both debug-log and smoke-fix instrumentation are env-gated, so the patched
-# file is a no-op unless SGLANG_TTFT_DEBUG or SGLANG_TTFT_SMOKE_FIX is set.
+# 1. Apply the instrumentation + both fix variants (all env-gated; no-op otherwise)
 python3 ttft_ablation/patches/apply_patches.py
 
-chmod +x ttft_ablation/run_ablation.sh
-```
-
-To remove instrumentation cleanly:
-```bash
-python3 ttft_ablation/patches/apply_patches.py --revert
-```
-
-## Run all 6 configs
-
-```bash
+# 2. Run the full sweep (~30 min on a single 4090)
 cd ttft_ablation
 ./run_ablation.sh all
-# ~15-25 min total on a single 4090
-```
 
-Individual:
-```bash
-./run_ablation.sh A_baseline
-./run_ablation.sh F1_smoke_fix
-```
-
-## Collect evidence
-
-```bash
+# 3. Get the comparison table
 python3 parse_logs.py results/<timestamp>/
 ```
 
-Prints a markdown table of small/large p99 TTFT + flag-true episode stats per config. Paste directly into the issue comment or PR description.
+Environment flags the patches respect:
 
-## Config map
+| flag | effect |
+|---|---|
+| `SGLANG_TTFT_DEBUG=1` | emit `[TTFT_DEBUG]` per-iter trace events |
+| `SGLANG_TTFT_SMOKE_FIX=1` | F1: clear `batch_is_full` at each admission entry (refuted) |
+| `SGLANG_TTFT_HOL_FIX=1` | E2: unconditionally continue on NO_TOKEN (works, but regresses large) |
+| `SGLANG_TTFT_HOL_SMART=1` | E3: continue on NO_TOKEN only when `rem_total_tokens > 0` (**proposed fix**) |
 
-**Updated 2026-04-18**: A / F1 / C already run, all show p99 ≈ 27-30s. This
-refutes H1 (sticky flag) and H7 (decode super-linear / KV pressure). Log
-analysis points to **H11: FCFS HOL blocking + early-break on NO_TOKEN** —
-admission loop breaks at the first large req that can't fit, never tries
-smaller reqs queued behind it. E2 is the decisive experiment for H11.
-
-| Label | Tests | Expected outcome |
-|---|---|---|
-| A_baseline | reporter's config | small p99 ≈ 22-27s (confirms repro) — ✅ DONE |
-| F1_smoke_fix | SGLANG_TTFT_SMOKE_FIX=1, clears flag at ENTRY | no change (flag not root cause) — ✅ DONE, H1 refuted |
-| C_mrr8 | `--max-running-requests 8` | no change (not KV bandwidth bound) — ✅ DONE, H7 refuted |
-| B_no_mixed_chunk | `--disable-mixed-chunk` | probably no change |
-| D_chunk32k | `--chunked-prefill-size 32768` | large req fits in one chunk, sidesteps chunking budget contention; may help as workaround |
-| E_priority | `--enable-priority-scheduling` | no change (clients don't set priority) |
-| **E2_hol_fix** | **SGLANG_TTFT_HOL_FIX=1** | **small p99 drops to < 5s → H11 confirmed + candidate fix validated** |
-
-## Skipping already-run configs
-
-```bash
-# comma-separated list of labels to skip on a fresh OUTDIR
-SKIP="A_baseline,F1_smoke_fix,C_mrr8" ./run_ablation.sh all
-
-# or: re-point OUTDIR at a prior run — any config with an existing
-# *.repro.log in OUTDIR is auto-skipped
-OUTDIR=./results/20260418-1830 ./run_ablation.sh all
-```
-
-## Cleanup
-
+Revert:
 ```bash
 python3 ttft_ablation/patches/apply_patches.py --revert
-# or
-git checkout -- python/sglang/srt/managers/scheduler.py
 ```
+
+## Reading order
+
+1. [`CONCLUSION.md`](CONCLUSION.md) — root cause + 5-line patch.
+2. [`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md) — every config tested, all
+   hypotheses, full result matrix, variance replicate.
+3. `repro_bench.py` + `run_ablation.sh` — to re-run.

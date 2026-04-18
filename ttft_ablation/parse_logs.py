@@ -19,6 +19,7 @@ Usage:  python3 parse_logs.py <results_dir>
 
 from __future__ import annotations
 
+import gzip
 import re
 import sys
 from dataclasses import dataclass, field
@@ -73,9 +74,17 @@ class ServerStats:
         return episodes
 
 
+def read_text(path: Path) -> str:
+    """Read a text file, transparently handling .gz."""
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", errors="ignore") as f:
+            return f.read()
+    return path.read_text(errors="ignore")
+
+
 def parse_server_log(path: Path) -> ServerStats:
     s = ServerStats()
-    for line in path.read_text(errors="ignore").splitlines():
+    for line in read_text(path).splitlines():
         if "[TTFT_DEBUG]" in line:
             m = TTFT_DEBUG_RE.search(line)
             if not m:
@@ -134,16 +143,21 @@ def main() -> int:
         print(f"error: {results_dir} is not a directory", file=sys.stderr)
         return 1
 
-    labels = sorted(
-        {p.stem.rsplit(".", 1)[0] for p in results_dir.glob("*.server.log")}
+    server_logs = (
+        list(results_dir.glob("*.server.log"))
+        + list(results_dir.glob("*.server.log.gz"))
     )
+    labels = sorted({p.name.split(".server.log")[0] for p in server_logs})
     if not labels:
-        print(f"no *.server.log in {results_dir}", file=sys.stderr)
+        print(f"no *.server.log[.gz] in {results_dir}", file=sys.stderr)
         return 1
 
     rows = []
     for label in labels:
-        srv = parse_server_log(results_dir / f"{label}.server.log")
+        server_path = results_dir / f"{label}.server.log"
+        if not server_path.exists():
+            server_path = results_dir / f"{label}.server.log.gz"
+        srv = parse_server_log(server_path)
         repro_path = results_dir / f"{label}.repro.log"
         ttft = parse_repro_log(repro_path) if repro_path.exists() else TTFTStats()
         episodes = srv.flag_true_episodes()
