@@ -160,6 +160,19 @@ run_config() {
   local env_vars="$1"; shift
   local server_args="$*"
 
+  # Honor SKIP (comma-separated list of labels already run in a prior session).
+  # Usage:  SKIP=A_baseline,F1_smoke_fix,C_mrr8 ./run_ablation.sh all
+  if [[ ",${SKIP:-}," == *",$label,"* ]]; then
+    echo ">>> [$label] SKIPPED (matched \$SKIP=${SKIP})"
+    return 0
+  fi
+  # Also skip if an *.repro.log already exists in OUTDIR for this label —
+  # handy when re-pointing OUTDIR at a prior run to resume from failure.
+  if [[ -s "$OUTDIR/$label.repro.log" ]]; then
+    echo ">>> [$label] SKIPPED (existing log at $OUTDIR/$label.repro.log)"
+    return 0
+  fi
+
   echo "======================================================================"
   echo "CONFIG $label"
   echo "env: $env_vars"
@@ -210,6 +223,16 @@ fi
 # F1 — SMOKE FIX: reset batch_is_full each iteration (the key ablation)
 if [[ "$TARGET" == "F1" || "$TARGET" == "all" ]]; then
   run_config "F1_smoke_fix" "SGLANG_TTFT_SMOKE_FIX=1" ""
+fi
+
+# E2 — HOL FIX (H11 decisive experiment). On NO_TOKEN, revoke the flag and
+# `continue` to the next waiting req instead of breaking out of the loop.
+# This is the actual candidate fix for the FCFS head-of-line blocking that
+# the log analysis pinned down. F1-style flag-clearing was insufficient
+# because the loop re-enters from queue head each iter and re-breaks on the
+# same large req; E2 changes the loop semantics themselves.
+if [[ "$TARGET" == "E2" || "$TARGET" == "all" ]]; then
+  run_config "E2_hol_fix" "SGLANG_TTFT_HOL_FIX=1" ""
 fi
 
 echo ">>> All configs complete. Results in: $OUTDIR"

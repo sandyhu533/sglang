@@ -145,7 +145,77 @@ REPLACE_SET_B = (
 )
 
 # ----------------------------------------------------------------------------
-# PATCH 5 — CLEAR_D log (batch shrunk in update_running_batch).
+# PATCH 5a — SET_C log (NO_TOKEN path) with input_len.
+# Critical for H11 validation: if stuck iterations repeatedly log
+# req_input_len ≈ 24000 (same head-of-queue large req), HOL is confirmed.
+# ----------------------------------------------------------------------------
+ANCHOR_SET_C = (
+    "                    else:\n"
+    "                        self.running_batch.batch_is_full = True\n"
+    "                # revert matched mamba idx to avoid memory leak, if req is not added\n"
+)
+REPLACE_SET_C = (
+    "                    else:\n"
+    "                        self.running_batch.batch_is_full = True\n"
+    f"{MARK_START} [debug_set_c]\n"
+    '                    if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":\n'
+    "                        logger.info(\n"
+    '                            f"[TTFT_DEBUG] ev=SET_C_NO_TOKEN "\n'
+    '                            f"t={time.perf_counter():.6f} "\n'
+    '                            f"req_input_len={len(req.origin_input_ids)} "\n'
+    '                            f"can_run={len(adder.can_run_list)} "\n'
+    '                            f"kv_avail={self.token_to_kv_pool_allocator.available_size()}"\n'
+    "                        )\n"
+    f"{MARK_END} [debug_set_c]\n"
+    "                # revert matched mamba idx to avoid memory leak, if req is not added\n"
+)
+
+# ----------------------------------------------------------------------------
+# PATCH 5b — HOL-fix E2 (H11): conditional continue on NO_TOKEN.
+#
+# Root cause (H11): admission loop iterates waiting_queue in FCFS order.
+# First head-of-queue large req returns NO_TOKEN -> batch_is_full=True +
+# break. Loop never tries smaller reqs queued behind it. F1 failed because
+# clearing the flag at next ENTRY doesn't change the traversal order —
+# next iteration re-enters from queue head, hits same large, breaks again.
+#
+# Fix (E2): when SGLANG_TTFT_HOL_FIX=1, on NO_TOKEN, revoke the flag set
+# we just did (batch isn't "full" in a slot sense; we just couldn't fit
+# THIS particular req) and `continue` to the next waiting req.
+#
+# Safety concerns left for the production PR:
+#   - large-req starvation (need aging / bounded skip)
+#   - NO_TOKEN with 3 different root causes (rem_total / rem_input /
+#     rem_chunk); continue is only strictly correct for rem_total
+# For smoke testing H11, the bluntest form is fine.
+# ----------------------------------------------------------------------------
+ANCHOR_HOL_FIX = (
+    "                    req.mamba_pool_idx = None\n"
+    "                break\n"
+)
+REPLACE_HOL_FIX = (
+    "                    req.mamba_pool_idx = None\n"
+    f"{MARK_START} [hol_fix_e2]\n"
+    "                if (\n"
+    '                    os.environ.get("SGLANG_TTFT_HOL_FIX", "0") == "1"\n'
+    "                    and res == AddReqResult.NO_TOKEN\n"
+    "                ):\n"
+    "                    # E2: revoke flag + try next waiting req (H11 HOL fix).\n"
+    "                    self.running_batch.batch_is_full = False\n"
+    '                    if os.environ.get("SGLANG_TTFT_DEBUG", "0") == "1":\n'
+    "                        logger.info(\n"
+    '                            f"[TTFT_DEBUG] ev=HOL_FIX_SKIP "\n'
+    '                            f"t={time.perf_counter():.6f} "\n'
+    '                            f"skipped_input_len={len(req.origin_input_ids)} "\n'
+    '                            f"can_run={len(adder.can_run_list)}"\n'
+    "                        )\n"
+    "                    continue\n"
+    f"{MARK_END} [hol_fix_e2]\n"
+    "                break\n"
+)
+
+# ----------------------------------------------------------------------------
+# PATCH 6 — CLEAR_D log (batch shrunk in update_running_batch).
 # ----------------------------------------------------------------------------
 ANCHOR_CLEAR_D = (
     "        if batch.batch_size() < initial_bs:\n"
@@ -172,6 +242,8 @@ PATCHES = [
     ("debug_early_return", ANCHOR_EARLY_RETURN, REPLACE_EARLY_RETURN),
     ("debug_set_a", ANCHOR_SET_A, REPLACE_SET_A),
     ("debug_set_b", ANCHOR_SET_B, REPLACE_SET_B),
+    ("debug_set_c", ANCHOR_SET_C, REPLACE_SET_C),
+    ("hol_fix_e2", ANCHOR_HOL_FIX, REPLACE_HOL_FIX),
     ("debug_clear_d", ANCHOR_CLEAR_D, REPLACE_CLEAR_D),
 ]
 
@@ -195,8 +267,10 @@ def apply() -> int:
 
     TARGET.write_text(src)
     print(f"\npatched: {TARGET}")
-    print("\nenable at launch:")
-    print("  SGLANG_TTFT_DEBUG=1 SGLANG_TTFT_SMOKE_FIX=1 python -m sglang.launch_server ...")
+    print("\nenv flags (mutually compatible, all off = no-op):")
+    print("  SGLANG_TTFT_DEBUG=1       [TTFT_DEBUG] per-iter trace events")
+    print("  SGLANG_TTFT_SMOKE_FIX=1   F1 ablation (refuted): clear sticky flag at ENTRY")
+    print("  SGLANG_TTFT_HOL_FIX=1     E2 ablation (H11 candidate): skip NO_TOKEN instead of break")
     return 0
 
 
