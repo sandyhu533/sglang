@@ -1,0 +1,49 @@
+Skipping import of cpp extensions due to incompatible torch version. Please upgrade to torch >= 2.11.0 (found 2.9.1+cu128).
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+benchmark_args=Namespace(backend='sglang', base_url='http://localhost:30001', host='0.0.0.0', port=None, ready_check_timeout_sec=60, dataset_name='sharegpt', dataset_path='', model='Qwen/Qwen3-0.6B', served_model_name=None, tokenizer=None, num_prompts=1000, sharegpt_output_len=None, sharegpt_context_len=None, random_input_len=1024, random_output_len=1024, random_range_ratio=0.0, image_count=1, image_resolution='1080p', random_image_count=False, image_format='jpeg', image_content='random', request_rate=inf, use_trace_timestamps=False, max_concurrency=64, output_file='/workspace/sglang/ttft_ablation/results/throughput/sweep/A_c64_s7.json', output_details=False, print_requests=False, disable_tqdm=True, disable_stream=False, return_logprob=False, top_logprobs_num=0, token_ids_logprob=None, logprob_start_len=-1, return_routed_experts=False, seed=7, disable_ignore_eos=False, extra_request_body=None, apply_chat_template=False, profile=False, plot_throughput=False, profile_activities=['CPU', 'GPU'], profile_start_step=None, profile_steps=None, profile_num_steps=None, profile_by_stage=False, profile_stages=None, profile_output_dir=None, profile_prefix=None, lora_name=None, lora_request_distribution='uniform', lora_zipf_alpha=1.5, prompt_suffix='', pd_separated=False, profile_prefill_url=None, profile_decode_url=None, flush_cache=False, warmup_requests=1, tokenize_prompt=False, gsp_num_groups=64, gsp_prompts_per_group=16, gsp_system_prompt_len=2048, gsp_question_len=128, gsp_output_len=256, gsp_range_ratio=1.0, gsp_fast_prepare=False, gsp_send_routing_key=False, gsp_num_turns=1, gsp_ordered=False, mooncake_slowdown_factor=1.0, mooncake_num_rounds=1, mooncake_workload='conversation', fake_prefill=False, tag=None, header=None)
+Waiting up to 60s for http://localhost:30001/v1/models to become ready...
+Server ready in 0.0s.
+Namespace(backend='sglang', base_url='http://localhost:30001', host='0.0.0.0', port=30000, ready_check_timeout_sec=60, dataset_name='sharegpt', dataset_path='', model='Qwen/Qwen3-0.6B', served_model_name=None, tokenizer=None, num_prompts=1000, sharegpt_output_len=None, sharegpt_context_len=None, random_input_len=1024, random_output_len=1024, random_range_ratio=0.0, image_count=1, image_resolution='1080p', random_image_count=False, image_format='jpeg', image_content='random', request_rate=inf, use_trace_timestamps=False, max_concurrency=64, output_file='/workspace/sglang/ttft_ablation/results/throughput/sweep/A_c64_s7.json', output_details=False, print_requests=False, disable_tqdm=True, disable_stream=False, return_logprob=False, top_logprobs_num=0, token_ids_logprob=None, logprob_start_len=-1, return_routed_experts=False, seed=7, disable_ignore_eos=False, extra_request_body=None, apply_chat_template=False, profile=False, plot_throughput=False, profile_activities=['CPU', 'GPU'], profile_start_step=None, profile_steps=None, profile_num_steps=None, profile_by_stage=False, profile_stages=None, profile_output_dir=None, profile_prefix=None, lora_name=None, lora_request_distribution='uniform', lora_zipf_alpha=1.5, prompt_suffix='', pd_separated=False, profile_prefill_url=None, profile_decode_url=None, flush_cache=False, warmup_requests=1, tokenize_prompt=False, gsp_num_groups=64, gsp_prompts_per_group=16, gsp_system_prompt_len=2048, gsp_question_len=128, gsp_output_len=256, gsp_range_ratio=1.0, gsp_fast_prepare=False, gsp_send_routing_key=False, gsp_num_turns=1, gsp_ordered=False, mooncake_slowdown_factor=1.0, mooncake_num_rounds=1, mooncake_workload='conversation', fake_prefill=False, tag=None, header=None)
+
+#Input tokens: 286170
+#Output tokens: 190278
+Starting warmup with 1 sequences...
+Warmup completed with 1 sequences. Starting main benchmark run...
+
+============ Serving Benchmark Result ============
+Backend:                                 sglang    
+Traffic request rate:                    inf       
+Max request concurrency:                 64        
+Successful requests:                     1000      
+Benchmark duration (s):                  56.57     
+Total input tokens:                      286170    
+Total input text tokens:                 286170    
+Total generated tokens:                  190278    
+Total generated tokens (retokenized):    190255    
+Request throughput (req/s):              17.68     
+Input token throughput (tok/s):          5058.88   
+Output token throughput (tok/s):         3363.71   
+Peak output token throughput (tok/s):    4002.00   
+Peak concurrent requests:                91        
+Total token throughput (tok/s):          8422.59   
+Concurrency:                             60.24     
+----------------End-to-End Latency----------------
+Mean E2E Latency (ms):                   3407.78   
+Median E2E Latency (ms):                 2249.44   
+P90 E2E Latency (ms):                    8056.31   
+P99 E2E Latency (ms):                    14426.31  
+---------------Time to First Token----------------
+Mean TTFT (ms):                          53.30     
+Median TTFT (ms):                        42.25     
+P99 TTFT (ms):                           256.64    
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          18.65     
+Median TPOT (ms):                        18.41     
+P99 TPOT (ms):                           29.46     
+---------------Inter-Token Latency----------------
+Mean ITL (ms):                           17.72     
+Median ITL (ms):                         15.04     
+P95 ITL (ms):                            33.36     
+P99 ITL (ms):                            45.53     
+Max ITL (ms):                            300.09    
+==================================================

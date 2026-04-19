@@ -1,9 +1,11 @@
-# The repo-root .gitignore has `*.log` which would swallow every .repro.log
-# and .server.log under here. We explicitly want:
+# The repo-root .gitignore has `*.log` which would swallow every .repro.log,
+# .server.log, and bench_serving .log under here. We explicitly want:
 #   - Small *.repro.log summaries → TRACKED (headline numbers).
+#   - Small throughput/*_c*_s*.log summaries → TRACKED.
 #   - *.server.log uncompressed traces → NOT tracked (tens of MB each).
 #   - *.server.log.gz compressed traces → TRACKED (~10× smaller, still parseable
 #     via parse_logs.py which handles both suffixes).
 !results/**/*.repro.log
 !results/**/*.server.log.gz
+!results/throughput/**/*.log
 results/**/*.server.log

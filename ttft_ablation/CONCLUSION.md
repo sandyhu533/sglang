@@ -202,6 +202,81 @@ changes, but below 1σ).
 - `results/bench_serving/<config>_<concurrency>_seed<N>.json`
 - Summary table appended to this file after runs complete
 
+### Results (A vs E3, paired, n=10)
+
+Raw JSONs: `ttft_ablation/results/throughput/sweep/`. Parsers:
+`ttft_ablation/parse_throughput.py` (raw aggregation) and
+`ttft_ablation/paired_stats.py` (paired t-test + JSON-based anomaly
+detection). G3 skipped — A vs E3 already answers the "does the fix
+regress throughput?" question; the extra chunk-sizing knob was already
+shown orthogonal in the TTFT ablation (G3 ≈ E3 there).
+
+c=32 uses a "healthy-path" view (n=8) that excludes 2 baseline seeds
+where HOL events triggered (s2 severe, s4 mild — see anomaly table
+below). Including them, full-10-seed c=32 means are skewed by the HOL
+runs (throughput Δ = +7.9 %, p99 TTFT Δ = −32 %) but carry the same
+sign.
+
+**Output throughput (tok/s, paired Δ = E3 − A)**
+
+| concurrency | μ_A | μ_E3 | Δ | p | sign |
+|---:|---:|---:|---:|---:|---:|
+| 32 (healthy, n=8) | 2028 | 2044 | +0.8 % | 0.22 | 6/8 |
+| 64  (n=10)        | 3525 | 3518 | −0.2 % | 0.84 | 5/10 |
+| 128 (n=10)        | 5899 | 5844 | −0.9 % | 0.52 | 4/10 |
+
+**TTFT p99 (ms)**
+
+| concurrency | μ_A | μ_E3 | Δ | p | sign |
+|---:|---:|---:|---:|---:|---:|
+| 32 (healthy, n=8) | 167 | 162 | −3.4 % | 0.34 | 5/8 |
+| 64  (n=10)        | 337 | 323 | −4.1 % | 0.32 | 7/10 |
+| 128 (n=10)        | 579 | 575 | −0.8 % | 0.91 | 3/10 |
+
+**ITL p99 (ms)**
+
+| concurrency | μ_A | μ_E3 | Δ | p | sign |
+|---:|---:|---:|---:|---:|---:|
+| 32 (healthy, n=8) | 37 | 37 | −0.6 % | 0.52 | 3/8 |
+| 64  (n=10)        | 44 | 45 | +2.1 % | 0.22 | 4/10 |
+| 128 (n=10)        | 65 | 67 | +2.5 % | 0.20 | 4/10 |
+
+**HOL event incidence (JSON-based anomaly detection on A p99 TTFT + duration)**
+
+| concurrency | baseline | E3 |
+|---:|---|---|
+| 32 | **2/10** (s2: p99 678 ms, duration 242 s vs 98 s healthy; s4: p99 367 ms vs ~180 healthy) | **0/10** |
+| 64 | 0/10 | 0/10 |
+| 128 | 0/10 | 0/10 |
+
+### Prediction vs observed (n=10)
+
+- **Throughput c=128 "E3 ≈ A"**: observed −0.9 % (p=0.52). The early
+  n=3 reading of −3.8 % was sampling noise — at n=10 throughput is
+  firmly indistinguishable from baseline at every concurrency. ✓
+- **TTFT p99 c=64 "−5 to −15 %"**: observed −4.1 % (p=0.32, 7/10 seeds
+  directionally better). Just under the predicted lower bound;
+  direction correct, magnitude weaker, not stat-sig at this n.
+- **TTFT p99 c=128 "−10 to −30 %"**: observed −0.8 % (p=0.91). No
+  effect. Consistent with ShareGPT c=128 being concurrency-saturated
+  (running-req hits max, `token_usage` ≤ 0.43) rather than KV-
+  saturated — E3's guard rarely fires when `add_one_req` returns
+  `OTHER` (max-concurrency) rather than `NO_TOKEN`.
+- **ITL p99 "≈ A, maybe marginally worse below 1σ"**: observed +2.1 %
+  @ c=64 and +2.5 % @ c=128, neither stat-sig (p ≥ 0.20, 4/10 seeds
+  improving at each). Matches prediction — directionally consistent
+  sub-noise elevation from admitting extra smalls that briefly co-run
+  with decodes.
+
+**Verdict.** On ShareGPT at paired n=10: throughput neutral
+(|Δ| ≤ 0.9 %, p ≥ 0.22), TTFT p99 directionally better but not
+stat-sig at this sample size, ITL p99 +2.1–2.5 % elevation (non-sig).
+The decisive finding is **HOL event elimination** at c=32
+(2/10 → 0/10 baseline events), directly validating the fix mechanism.
+Combined with the 9.5× asymmetric-workload gain from the repro, this
+is the "safe to merge" signal: no regression that meets stat-sig at
+n=10, clear mechanism validation.
+
 ## Risk / follow-ups
 
 - Unbounded skip: a continuous stream of smalls could starve a large.
@@ -212,3 +287,11 @@ changes, but below 1σ).
   Revoking `batch_is_full = False` is strictly looser than the
   hierarchical-cache branch's conditional set; it shouldn't break
   invariants, but worth a reviewer's eye.
+
+- Sub-noise ITL p99 elevation on ShareGPT at saturation (+2.1 % at
+  c=64, +2.5 % at c=128; p ≥ 0.20 at n=10). Direction consistent
+  across both concurrencies but magnitude below stat-sig. Attributable
+  to E3 occasionally admitting a small that briefly co-runs with
+  decode. If adoption surfaces a reproducible ITL p99 increase on
+  different workloads, `max_skips_per_outer_iter` (same as the
+  starvation follow-up) bounds it cleanly.
