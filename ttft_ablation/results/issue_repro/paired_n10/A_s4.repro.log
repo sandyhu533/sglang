@@ -1,0 +1,22 @@
+Server: http://localhost:30001
+Workload: 40 large (3500 words) + 120 small (40 words)
+Baseline: 38 ms (single small request)
+
+  Run 1/3: Small p99=10742ms  Large p99=10665ms  Output tok/s=358  (small samples=120, large samples=40)
+  Run 2/3: Small p99=10685ms  Large p99=10621ms  Output tok/s=359  (small samples=120, large samples=40)
+  Run 3/3: Small p99=10715ms  Large p99=10662ms  Output tok/s=358  (small samples=120, large samples=40)
+
+============================================================
+Small requests (360 samples):
+  Baseline : 38 ms
+  Small burst p50: 7909 ms
+  Small p99: 10768 ms (283.8x baseline)
+  Small mean: 8034 ms
+Large requests (120 samples):
+  Large p99: 10857 ms
+  Large mean: 5510 ms
+Throughput (3 runs aggregated):
+  Output tok/s: 358 (total 13404 tokens over 37.4 s wall)
+
+BUG CONFIRMED: small p99=10768ms >> baseline=38ms
+============================================================

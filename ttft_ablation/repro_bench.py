@@ -58,8 +58,12 @@ def random_prompt(target_words: int) -> str:
 
 async def send_request(
     client: httpx.AsyncClient, url: str, prompt: str, max_tokens: int
-) -> Tuple[Optional[float], Optional[str]]:
-    """Send one completion request and measure TTFT. Returns (ttft_ms, err)."""
+) -> Tuple[Optional[float], int, Optional[str]]:
+    """Send one completion request, measure TTFT + token count.
+
+    Returns (ttft_ms, n_output_tokens, err). Streaming v1/completions emits
+    one `data: {...}` chunk per generated token, so we count chunks.
+    """
     payload = {
         "prompt": prompt,
         "max_tokens": max_tokens,
@@ -68,6 +72,7 @@ async def send_request(
     }
     sent_at = time.time()
     first_token_at: Optional[float] = None
+    n_tokens = 0
     try:
         async with client.stream("POST", f"{url}/v1/completions", json=payload) as resp:
             resp.raise_for_status()
@@ -75,11 +80,12 @@ async def send_request(
                 if line.startswith("data: ") and line != "data: [DONE]":
                     if first_token_at is None:
                         first_token_at = time.time()
+                    n_tokens += 1
     except Exception as exc:
-        return None, str(exc)
+        return None, 0, str(exc)
     if first_token_at is None:
-        return None, "no tokens received"
-    return (first_token_at - sent_at) * 1000, None
+        return None, 0, "no tokens received"
+    return (first_token_at - sent_at) * 1000, n_tokens, None
 
 
 async def run_burst(
@@ -92,21 +98,28 @@ async def run_burst(
     small_out: int,
     small_start_ms: int,
     small_interval_ms: int,
-) -> Tuple[List[float], List[float], int]:
-    """Fire one burst: large-burst at t=0, small-stream from small_start_ms."""
+) -> Tuple[List[float], List[float], int, int, float]:
+    """Fire one burst: large-burst at t=0, small-stream from small_start_ms.
+
+    Returns (small_ttfts, large_ttfts, errors, total_output_tokens,
+    wall_clock_seconds). Wall clock = first-fire → all-complete, so the
+    throughput is apples-to-apples with end-to-end serving throughput.
+    """
     small_ttfts: List[float] = []
     large_ttfts: List[float] = []
     errors = 0
+    total_tokens = 0
 
     async with httpx.AsyncClient(timeout=180.0) as client:
         tasks: List[asyncio.Task] = []
         t0 = time.time()
 
         async def track(coro, bucket: List[float]):
-            nonlocal errors
-            ttft, err = await coro
+            nonlocal errors, total_tokens
+            ttft, n_tok, err = await coro
             if err is None and ttft is not None:
                 bucket.append(ttft)
+                total_tokens += n_tok
             else:
                 errors += 1
 
@@ -133,8 +146,9 @@ async def run_burst(
             )
 
         await asyncio.gather(*tasks, return_exceptions=True)
+        wall_s = time.time() - t0
 
-    return small_ttfts, large_ttfts, errors
+    return small_ttfts, large_ttfts, errors, total_tokens, wall_s
 
 
 async def flush_cache(url: str) -> None:
@@ -168,7 +182,7 @@ async def main() -> int:
 
     # 1. Baseline TTFT — single small request, cold path.
     async with httpx.AsyncClient(timeout=30.0) as client:
-        baseline_ms, err = await send_request(
+        baseline_ms, _, err = await send_request(
             client, url, random_prompt(args.small_words), args.small_out
         )
     if baseline_ms is None:
@@ -183,11 +197,14 @@ async def main() -> int:
     all_small: List[float] = []
     all_large: List[float] = []
     total_errors = 0
+    per_run_tok_s: List[float] = []
+    total_out_tokens = 0
+    total_wall_s = 0.0
 
     for run in range(args.runs):
         await flush_cache(url)
         await asyncio.sleep(1.0)
-        small, large, errors = await run_burst(
+        small, large, errors, out_tokens, wall_s = await run_burst(
             url,
             num_large=args.num_large,
             num_small=args.num_small,
@@ -201,11 +218,16 @@ async def main() -> int:
         all_small.extend(small)
         all_large.extend(large)
         total_errors += errors
+        total_out_tokens += out_tokens
+        total_wall_s += wall_s
+        tok_s = out_tokens / wall_s if wall_s > 0 else 0.0
+        per_run_tok_s.append(tok_s)
         sp99, lp99 = p99(small), p99(large)
         err_str = f"  ({errors} errors)" if errors else ""
         print(f"  Run {run + 1}/{args.runs}: "
-              f"Small p99={sp99:.0f}ms  Large p99={lp99:.0f}ms"
-              f"  (small samples={len(small)}, large samples={len(large)})"
+              f"Small p99={sp99:.0f}ms  Large p99={lp99:.0f}ms  "
+              f"Output tok/s={tok_s:.0f}  "
+              f"(small samples={len(small)}, large samples={len(large)})"
               f"{err_str}")
         await asyncio.sleep(2.0)
 
@@ -229,6 +251,11 @@ async def main() -> int:
         print(f"Large requests ({len(all_large)} samples):")
         print(f"  Large p99: {lp99:.0f} ms")
         print(f"  Large mean: {lmean:.0f} ms")
+    if total_wall_s > 0:
+        agg_tok_s = total_out_tokens / total_wall_s
+        print(f"Throughput ({args.runs} runs aggregated):")
+        print(f"  Output tok/s: {agg_tok_s:.0f} (total {total_out_tokens} tokens "
+              f"over {total_wall_s:.1f} s wall)")
     if total_errors:
         print(f"Errors: {total_errors} requests failed")
 

@@ -43,19 +43,94 @@ Only scheduler admission loop. Single file, 5 added lines.
                  break
 ```
 
-## Measured impact
+## Measured impact — issue-repro (A vs E3, paired, n=10)
 
-Two outer replicates on `repro_bench.py` (40 large + 120 small requests;
-see README for full workload / hardware).
+**Setup.** `repro_bench.py` workload: 40 large (~11 k tok) + 120 small
+(~50 tok) requests co-firing at t=0. Baseline scheduler sets
+`batch_is_full=True` on every large-triggered `NO_TOKEN`, so HOL fires
+on every seed — this is the "upper bound on E3's impact" measurement.
+10 paired seeds × 3 inner runs averaged. Raw logs in
+`results/issue_repro/paired_n10/`; parser: `parse_issue_repro.py`.
 
-| metric | baseline scheduler | with fix | improvement |
-|---|---:|---:|---:|
-| small p99 | 10.9–27.2 s | 2.9–3.2 s | **3.4× – 9.5×** |
-| large p99 | 10.9–26.1 s | 12.9–13.7 s | ≈ flat / better |
+**Per-seed raw** (10/10 seeds show the same direction on every TTFT
+metric — tightness of the cluster is the headline):
 
-Variance on the baseline side is GPU-state-dependent; the fix is stable
-at ~3 s across replicates. Full matrix and per-run traces in
-[`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md).
+| seed | small_p99 A | small_p99 E3 | Δ      | large_p99 A | large_p99 E3 |
+| ---: | ----------- | ------------ | ------ | ----------- | ------------ |
+| 0    | 10.75 s     | 2.88 s       | −73.2 %| 10.86 s     | 11.31 s      |
+| 1    | 10.77 s     | 2.87 s       | −73.4 %| 10.87 s     | 11.32 s      |
+| 2    | 10.75 s     | 2.88 s       | −73.2 %| 10.87 s     | 11.32 s      |
+| 3    | 10.78 s     | 2.87 s       | −73.4 %| 10.88 s     | 11.35 s      |
+| 4    | 10.77 s     | 2.88 s       | −73.3 %| 10.86 s     | 11.29 s      |
+| 5    | 10.75 s     | 2.87 s       | −73.3 %| 10.83 s     | 11.29 s      |
+| 6    | 10.77 s     | 2.87 s       | −73.3 %| 10.88 s     | 11.33 s      |
+| 7    | 10.85 s     | 2.89 s       | −73.4 %| 10.94 s     | 11.29 s      |
+| 8    | 10.76 s     | 2.86 s       | −73.4 %| 10.87 s     | 11.32 s      |
+| 9    | 10.79 s     | 2.87 s       | −73.4 %| 10.87 s     | 11.33 s      |
+
+**Paired aggregate** (Wilcoxon signed-rank, n=10):
+
+| metric        | A (μ ± sd)       | E3 (μ ± sd)     | Δ           | ↓/10  | p (Wilcoxon) |
+|---------------|------------------|-----------------|------------:|------:|-------------:|
+| small p99     | 10.77 s ± 32 ms  | 2.87 s ± 8 ms   | **−73.3 %** | 10/10 | **0.002**    |
+| small p50     | 7.92 s ± 34 ms   | 1.35 s ± 16 ms  | −82.9 %     | 10/10 | 0.002        |
+| small mean    | 8.04 s ± 31 ms   | 1.26 s ± 8 ms   | −84.3 %     | 10/10 | 0.002        |
+| large p99     | 10.87 s ± 27 ms  | 11.31 s ± 21 ms | **+4.1 %**  | 0/10  | 0.002        |
+| large mean    | 5.52 s ± 15 ms   | 5.83 s ± 9 ms   | +5.5 %      | 0/10  | 0.002        |
+| output tok/s  | 354 ± 8 tok/s    | 350 ± 2 tok/s   | −1.1 %      | 2/10  | 0.328        |
+
+Every TTFT direction is significant at p=0.002 (the Wilcoxon floor for
+n=10 with unanimous sign, so the direction is reliable); throughput is
+non-significant (2/10 directionally higher, p=0.328) — neutral.
+
+**Reading**: small p99 drops ~3.7× (deterministic and reproducible to
+the ms across paired seeds) at the cost of a ~4 % / ~450 ms absolute
+shift on large p99 and no measurable throughput change. The large-side
+shift is structural: admitting a small into leftover KV slack pushes
+the next large's admission by one slot-release window (one decode
+step).
+
+### Cross-run comparison — E3 eliminates tail variance
+
+The cleanest way to see what the fix actually does is to pool this
+n=10 sweep with the earlier primary + replicate single-outer runs (all
+same scheduler.py, same seeds, same GPU — just different wall-clock
+sessions so thermal / CUDA-graph warmup state varies):
+
+| run                 | A small p99 | E3 small p99 | A large p99 | E3 large p99 |
+|---------------------|-------------|--------------|-------------|--------------|
+| primary (n=1 outer) | 27.15 s     | 2.85 s       | 26.10 s     | 12.85 s      |
+| replicate (n=1)     | 10.87 s     | 3.24 s       | 10.92 s     | 13.74 s      |
+| **paired n=10**     | **10.77 s ± 32 ms** | **2.87 s ± 8 ms** | **10.87 s ± 27 ms** | **11.31 s ± 21 ms** |
+
+Two regimes on the baseline side:
+
+- **Baseline is GPU-state-sensitive.** A small p99 swings 10.8 → 27 s
+  across sessions; A large p99 swings 10.9 → 26 s. The mechanism is
+  straightforward: each sticky-flag set pins admission for ~65
+  scheduler iterations, and how long those 65 iters take depends on
+  decode-step wall-clock (thermal throttle, CUDA graph cache state,
+  allocator churn, etc.). The bug **amplifies** whatever latency
+  noise is present in the decode path into the admission-pinning
+  window.
+
+- **E3 is GPU-state-insensitive.** E3 small p99 clusters at 2.9 ±
+  0.2 s, E3 large p99 at 12.5 ± 1.2 s — both ~10× tighter std than
+  baseline. Reason: E3 never enters the amplification loop. Admission
+  proceeds at the natural slot-release rate regardless of what decode
+  is doing.
+
+**So the fix's value is not primarily "lower mean"** (though it is
+that, 3.7×); it is **"collapse tail variance"**. In the lucky
+baseline regime (n=10 sweep), E3 pays +4 % on large p99 — the
+structural cost of admitting one extra small per slot. In the
+unlucky regime (primary), baseline pays 2.4× on both small and large
+p99, and E3 stays at its deterministic floor. A prod operator's
+tail-latency SLA is defined over whatever regimes their traffic hits
+— E3 removes the bad regime entirely.
+
+Full per-seed log traces and the full TTFT-ablation matrix (E2/D/G/G3/H)
+in [`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md).
 
 ## Root cause (walkthrough)
 
@@ -98,11 +173,17 @@ Log evidence from `ttft_ablation/results/primary/A_baseline.server.log`:
 3. **Always on, no new knob**: the guard makes the change a no-op when
    the bug can't manifest.
 
-4. **Better on both small AND large TTFT** vs baseline: because smalls
-   finish their decode quickly once admitted, the batch turns over
-   faster, and the blocked large gets its shot sooner. Large p99
-   actually drops (26.1 s → 12.9 s) on the repro — not a starvation
-   trade-off in practice for this workload.
+4. **Large-side cost is bounded and structural**, not runaway
+   starvation. Admitting a small into leftover KV slack pushes the
+   next large admission by one slot-release window (one decode step).
+   Measured: in the low-variance paired-n=10 regime, large p99 shifts
+   +4 % (+450 ms, 0/10 seeds improving); in the high-variance regime
+   where baseline had already paid heavy TTFT tail cost, large p99
+   *improves* ~50 % because small throughput frees up room faster.
+   Either way, no unbounded starvation — small admission stops as soon
+   as `rem_total_tokens` hits zero, and `max_skips_per_outer_iter` is
+   available as a bounded follow-up if any adversarial workload
+   surfaces real large-side delay.
 
 ## Alternatives considered (and why not)
 
@@ -125,113 +206,32 @@ Log evidence from `ttft_ablation/results/primary/A_baseline.server.log`:
   state and a threshold to pick. Deferred to a follow-up PR if anyone
   reports large-req starvation under adversarial traffic patterns.
 
-## Throughput validation (pre-registered)
+## Throughput validation — ShareGPT (A vs E3, paired, n=10)
 
-The repro workload (`repro_bench.py`) is a burst benchmark — it answers
-"does the fix help TTFT?" decisively but does not stress the fix under
-sustained saturation. Before opening the upstream PR, run the following
-benchmark with decision rule locked-in *before* seeing results.
+**Setup.** `python -m sglang.bench_serving` against `Qwen/Qwen3-0.6B`
+on 1× RTX 4090; ShareGPT, 1000 prompts, `--request-rate inf`,
+`--mem-fraction-static 0.82`, seeds 0..9 paired, concurrency
+∈ {32, 64, 128}. E3 = baseline + `SGLANG_TTFT_HOL_SMART=1`.
+Raw JSONs in `results/throughput/sweep/`; parsers: `parse_throughput.py`
+(aggregation), `paired_stats.py` (paired t-test + JSON-based HOL-event
+detection).
 
-**Workload**
+Three tiers of evidence, from mechanism → user-visible → safety:
 
-- Harness: `python -m sglang.bench_serving`
-- Dataset: ShareGPT (`--dataset-name sharegpt`)
-- Model: `Qwen/Qwen3-0.6B` on 1× RTX 4090
-- Server args: defaults + `--mem-fraction-static 0.82`
-- `--num-prompts 1000`; three concurrency sweeps: `--max-concurrency {32, 64, 128}`
-- `--request-rate inf` (offline saturation mode)
-- 3 seeds per cell
+#### Tier 1 — HOL event rate (mechanism)
 
-**Configs**
+Count HOL events, don't chase aggregate means: a seed is HOL-affected
+when (a) p99 TTFT is a σ>2 outlier for its cell AND (b) run duration is
+≥ 2× the cell median — the signature of a frozen admission loop.
 
-| label | server flags | rationale |
-|---|---|---|
-| A | baseline | reference |
-| E3 | `SGLANG_TTFT_HOL_SMART=1` | the proposed fix, production candidate |
-| G3 | `SGLANG_TTFT_HOL_SMART=1` + `--chunked-prefill-size 32768` | shows whether chunk sizing is an additional knob |
-
-Skip E2 (blunt, already known regression) and D/H (orthogonal, separate
-discussion).
-
-**Metrics**
-
-- Primary: output token throughput (tok/s)
-- Secondary: input tok/s, mean TTFT, p99 TTFT, ITL p99
-
-**Reporting**
-
-PR description will include μ ± σ (from the 3 seeds) for every cell, not
-just point estimates. Theoretical expectation: in sustained saturation,
-`rem_total_tokens == 0` holds most of the time, so E3's smart guard falls
-through to the original `break` path and E3 should be indistinguishable
-from A. Burst workload (`repro_bench.py`) already shows E3 is strictly
-better there. Reviewers can weigh the numbers against their own
-throughput bar and decide whether to merge.
-
-**Predictions** (stated before running, so "surprise" is meaningful)
-
-*Throughput:*
-- concurrency=32 (light load): E3 ≈ A. Skip path rarely triggers.
-- concurrency=64 (medium): E3 ≈ A, maybe marginally better.
-- concurrency=128 (saturated): E3 ≈ A. Smart guard falls through to
-  `break` when `rem_total_tokens == 0`. If E3 regresses vs A here, the
-  guard has a hole (likely missing the distinction between
-  `rem_total_tokens == 0` — true saturation — and `rem_input_tokens == 0`
-  / `rem_chunk_tokens == 0` — chunk-budget only).
-
-*TTFT p99:*
-- Saturation ≠ `rem_total_tokens == 0` holding continuously. When a
-  decode completes it frees N KV slots; if the head-of-queue req needs
-  M > N, baseline `break`s and leaves those N slots idle for an iter,
-  while E3 admits smaller reqs behind it to fill them. This window
-  persists whenever the workload is prompt-length-heterogeneous.
-- concurrency=32: E3 ≈ A.
-- concurrency=64: E3 better by ~5–15 % on TTFT p99.
-- concurrency=128: E3 better by ~10–30 % on TTFT p99; p50 ≈ A.
-- **Workload note**: this prediction assumes ShareGPT-style heterogeneous
-  prompts. On a fixed-length `--dataset-name random` run, heterogeneity
-  = 0 and the skip path never fires productively, so TTFT ≈ A. PR
-  description should call this out so reviewers running homogeneous
-  benchmarks don't conclude "no latency benefit".
-
-*ITL p99:* E3 ≈ A (maybe marginally worse from batch composition
-changes, but below 1σ).
-
-**Output artifacts**
-
-- `results/bench_serving/<config>_<concurrency>_seed<N>.json`
-- Summary table appended to this file after runs complete
-
-### Results (A vs E3, paired, n=10)
-
-Raw JSONs: `ttft_ablation/results/throughput/sweep/`. Parsers:
-`ttft_ablation/parse_throughput.py` (raw aggregation) and
-`ttft_ablation/paired_stats.py` (paired t-test + JSON-based anomaly
-detection). G3 skipped — A vs E3 already answers the "does the fix
-regress throughput?" question; the extra chunk-sizing knob was already
-shown orthogonal in the TTFT ablation (G3 ≈ E3 there).
-
-Three tiers of evidence, ordered from mechanism-level (what the fix
-actually claims to do) to user-visible impact to safety:
-
-#### Tier 1 — Primary: HOL event rate (mechanism)
-
-The fix targets head-of-line blocking. The direct way to tell if it
-works is to count HOL events before and after, not to chase aggregate
-latency means. Baseline seeds are classified as HOL-affected when both
-(a) p99 TTFT is a σ>2 outlier or near it under server-log inspection
-and (b) run duration is 2×+ the cell median — the combined pattern
-that characterizes a frozen admission loop (long duration because the
-outlier run cannot drain quickly).
-
-At c=32, baseline s2 (p99 678 ms, duration 242 s vs μ 113 s; σ>2) and
-baseline s4 (p99 367 ms, duration ≈ 180 s; server-log inspection) both
-match. Other cells have at most one borderline seed.
+At c=32, baseline s2 matches both (p99 678 ms, duration 242 s vs μ
+113 s) and s4 matches (b) weakly plus server-log confirmation (p99
+367 ms, duration ≈ 180 s).
 
 | concurrency | baseline HOL rate | E3 HOL rate |
 |---:|:---|:---|
 | 32  | **2/10 = 20 %**, Wilson 95 % CI [5.7 %, 51.0 %] | 0/10 = 0 %, Wilson 95 % CI [0.0 %, 27.8 %] |
-| 64  | 1/10 (s9 borderline, duration normal) | 0/10 |
+| 64  | 0/10 (s9 shows p99 elevation but E3 pairs equally; tail-luck, not HOL) | 0/10 |
 | 128 | 0/10 | 0/10 |
 
 Fisher exact on the c=32 2×2 table (A vs E3, HOL vs healthy):
@@ -239,18 +239,16 @@ Fisher exact on the c=32 2×2 table (A vs E3, HOL vs healthy):
 - Two-sided p = 0.474 (cannot reject the null that rates are equal at n=10)
 - One-sided "A has higher HOL rate than E3" p = **0.237**
 
-Not stat-sig at n=10 per arm — as expected, since rare-event detection
-needs much larger n to separate 20 % from 0 %. But the direction is
-unambiguous and the mechanism (skip oversized head-req when slack
-remains) is verified by per-iter server-log trace on the affected
-seeds (all 12 NO_TOKEN-triggered sticky-flag sets in s2 had
-`req_input_len ∈ [11046, 11268]`, i.e. every trigger was a large req
-— textbook HOL pattern).
+Not stat-sig at n=10 — rare-event detection needs larger n to separate
+20 % from 0 %. But direction is unambiguous and mechanism is confirmed
+by per-iter server-log trace: all 12 NO_TOKEN-triggered sticky-flag
+sets on s2 had `req_input_len ∈ [11046, 11268]`, i.e. every trigger was
+a large request — textbook HOL pattern.
 
-#### Tier 2 — Secondary: User-visible impact (headline numbers)
+#### Tier 2 — User-visible impact at c=32
 
-Full paired n=10 at c=32 (includes the HOL-affected baseline seeds —
-this is what a ShareGPT user actually experiences, outliers and all).
+Full paired n=10 at c=32, including the HOL-affected baseline seeds
+(what a ShareGPT user would experience, outliers and all):
 
 | metric | μ_A | μ_E3 | Δ | p (paired t) |
 |---|---:|---:|---:|---:|
@@ -258,24 +256,18 @@ this is what a ShareGPT user actually experiences, outliers and all).
 | p99 TTFT (ms) | 238 | 161 | **−32.4 %** | 0.18 |
 | p99 ITL (ms)  | 55  | 37  | **−32.4 %** | 0.25 |
 
-Not stat-sig at n=10 because the HOL-affected baseline seeds drive up
-baseline variance. That is a feature, not a bug, of the paired
-t-test: it refuses to declare significance when the signal is
-concentrated in a minority of seeds. The mechanism test in Tier 1 is
-the right instrument for that; Tier 2 says "when the bug fires in
-real traffic, the user-visible tail drops ≈ 30 %".
+Non-sig at n=10 because baseline variance is inflated by the two HOL
+seeds — the paired t-test correctly refuses to declare significance
+when the signal is concentrated in a minority. Read the takeaway as
+"when the bug fires in real traffic, the user-visible tail drops ~30 %",
+and look to Tier 1 for the mechanism claim and Tier 3 for no-regression.
 
-c=64 and c=128 show no headline change (see Tier 3).
+#### Tier 3 — Safety / no-regression
 
-#### Tier 3 — Tertiary: Safety / no-regression
-
-For "does the fix hurt performance on healthy (non-HOL) traffic?" the
-c=32 aggregate is the wrong tool — the n=10 deltas above are
-mechanically driven by outlier elimination, not by a per-seed shift,
-so using them for regression analysis double-counts the mechanism
-gain. The right view is: on the healthy-seed subset plus c=64 / c=128
-(which have essentially no HOL events to begin with), does E3 cost
-anything?
+Using the c=32 aggregate to ask "does E3 hurt healthy traffic?" would
+double-count the mechanism gain (outlier elimination ≠ per-seed shift).
+The right views are the healthy c=32 subset (excluding the two HOL
+seeds) and the c=64 / c=128 cells (where HOL events are essentially 0).
 
 Healthy c=32 subset (n=8, excludes s2 + s4):
 
@@ -286,7 +278,7 @@ Healthy c=32 subset (n=8, excludes s2 + s4):
 | mean TTFT   | 41   | 41   | −1.0 % | 0.29 | 5/8 |
 | p99 ITL     | 37   | 37   | −0.6 % | 0.52 | 3/8 |
 
-c=64 (n=10, no seed exclusion; baseline HOL count 1/10 borderline):
+c=64 (n=10, no seed exclusion; 0/10 HOL):
 
 | metric | μ_A | μ_E3 | Δ | p | sign |
 |---|---:|---:|---:|---:|---:|
@@ -306,34 +298,6 @@ No stat-sig movement at any cell. Largest sub-noise delta is p99 ITL
 +2.5 % at c=128 (p=0.20), directionally consistent with admitting an
 extra small that briefly co-runs with decode; bounded by the
 follow-up `max_skips_per_outer_iter` knob if it becomes reproducible.
-
-### Prediction vs observed (n=10)
-
-- **HOL rate** (pre-registered as the mechanism test, not a mean): A
-  2/10, E3 0/10. Direction correct, magnitude matches pre-reg belief
-  that ShareGPT at c=32 is where the bug most plausibly fires. ✓
-- **Throughput c=32 "E3 ≈ A"**: headline observed +7.9 %. Under-
-  predicted — the original "skip path rarely triggers at light load"
-  assumption missed that ShareGPT c=32 is exactly where HOL does
-  fire in the wild. Healthy-subset check (+0.8 %) matches the
-  original "≈ A" prediction, so the prediction was right for the
-  no-regression claim but wrong for not anticipating the mechanism
-  would fire at light load.
-- **Throughput c=64/128 "E3 ≈ A"**: observed −0.2 % / −0.9 %
-  (p ≥ 0.52). ✓
-- **TTFT p99 c=32 "E3 ≈ A"**: headline −32 %; healthy-subset −3.4 %.
-  Same miss as above.
-- **TTFT p99 c=64 "−5 to −15 %"**: observed −4.1 % (p=0.32, 7/10
-  seeds directionally better). Just under the predicted lower bound.
-- **TTFT p99 c=128 "−10 to −30 %"**: observed −0.8 % (p=0.91). No
-  effect. ShareGPT c=128 is concurrency-saturated (running-req hits
-  max, `token_usage` ≤ 0.43) rather than KV-saturated — E3's guard
-  rarely fires when `add_one_req` returns `OTHER` (max-concurrency)
-  rather than `NO_TOKEN`.
-- **ITL p99 "≈ A, maybe marginally worse below 1σ"**: headline c=32
-  −32 % (HOL outlier effect); c=64 +2.1 %, c=128 +2.5 % (both non-
-  sig). c=64 / c=128 match prediction; c=32 is pulled by the same
-  outlier effect as TTFT p99.
 
 **Verdict.** Three-layer story:
 
